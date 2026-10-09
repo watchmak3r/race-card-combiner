@@ -30,19 +30,17 @@ with col2:
     rag_file = st.file_uploader("2. Ragozin Sheets (PDF)", type="pdf", key="rag")
 
 def extract_ragozin_page_numbers(rag_page):
-    """Extracts valid Ragozin figures from a single horse's Ragozin page in proper layout order."""
+    """Extracts Ragozin figures and modifiers from an individual horse's page."""
     words = rag_page.get_text("words")
-    # Filter out page headers/footers
     body_words = [w for w in words if 40 < w[1] < 730]
-    # Sort top-to-bottom, then left-to-right
     sorted_words = sorted(body_words, key=lambda w: (w[1] // 15, w[0]))
     
     page_numbers = []
     for w in sorted_words:
         text = w[4].strip()
-        if re.match(r'^\d{1,2}[+\-"]?$', text):
-            val_num = int(re.sub(r'\D', '', text))
-            if 1 <= val_num <= 45:
+        if re.match(r'^[\.\d]{1,3}[+\-"]?$', text) or re.match(r'^\d{1,2}[+\-"]?$', text):
+            clean_val = re.sub(r'^\.', '', text)
+            if len(clean_val) > 0:
                 page_numbers.append(text)
     return page_numbers
 
@@ -52,26 +50,22 @@ def process_pdfs(drf_bytes, rag_bytes):
         rag_doc = fitz.open(stream=rag_bytes, filetype="pdf")
         
         rag_page_idx = 0
-        date_pattern = re.compile(r'^\d{1,2}[A-Za-z]{3}\d{2}')
+        weight_pattern = re.compile(r'^L?1[1-3]\d[a-zA-Z]*$')
         horse_header_pattern = re.compile(r'^\d+\s+[A-Z]')
 
         for page in drf_doc:
             words = page.get_text("words")
             
-            # Find all horse header positions and past performance date rows on this page
             elements = []
             for w in words:
                 text = w[4].strip()
                 x_coord = w[0]
                 
-                if x_coord < 70:
-                    if date_pattern.match(text):
-                        elements.append({'type': 'pp_row', 'y': w[3]})
-                    elif horse_header_pattern.match(text):
-                        elements.append({'type': 'horse_header', 'y': w[3]})
+                if weight_pattern.match(text) and x_coord > 350:
+                    elements.append({'type': 'pp_row', 'x': x_coord, 'y': w[3]})
+                elif horse_header_pattern.match(text) and x_coord < 70:
+                    elements.append({'type': 'horse_header', 'x': x_coord, 'y': w[3]})
             
-            # Group rows by horse block or process sequentially
-            # Since each horse block has past performance rows, we map the next Ragozin page per horse header encountered
             current_horse_rows = []
             horses_data = []
             
@@ -81,29 +75,37 @@ def process_pdfs(drf_bytes, rag_bytes):
                         horses_data.append(current_horse_rows)
                         current_horse_rows = []
                 elif el['type'] == 'pp_row':
-                    current_horse_rows.append(el['y'])
+                    current_horse_rows.append({'x': el['x'], 'y': el['y']})
             if current_horse_rows:
                 horses_data.append(current_horse_rows)
 
-            # For each horse found on the DRF page, pull the corresponding Ragozin sheet page
-            for pp_y_coords in horses_data:
+            for pp_rows in horses_data:
                 horse_rag_numbers = []
                 if rag_page_idx < len(rag_doc):
                     horse_rag_numbers = extract_ragozin_page_numbers(rag_doc[rag_page_idx])
                     rag_page_idx += 1
                 
-                # Clean up duplicate/overlapping Y coordinates for safety
-                cleaned_y = []
-                for y in pp_y_coords:
-                    if not cleaned_y or (y - cleaned_y[-1] > 8):
-                        cleaned_y.append(y)
+                cleaned_rows = []
+                for row in pp_rows:
+                    if not cleaned_rows or (row['y'] - cleaned_rows[-1]['y'] > 8):
+                        cleaned_rows.append(row)
 
-                # Inject the horse's specific Ragozin figures next to its past performance rows
-                for idx, y_val in enumerate(cleaned_y):
+                for idx, row in enumerate(cleaned_rows):
                     if idx < len(horse_rag_numbers):
                         val = horse_rag_numbers[idx]
+                        
+                        if idx == 0:
+                            inject_x = row['x'] - 24
+                        else:
+                            if len(val) > 1:
+                                inject_x = row['x'] - 20
+                            else:
+                                inject_x = row['x'] - 16
+                                
+                        inject_y = row['y'] - 2 
+                        
                         page.insert_text(
-                            fitz.Point(18, y_val - 2),
+                            fitz.Point(inject_x, inject_y),
                             val,
                             fontsize=9,
                             fontname="hebo",
