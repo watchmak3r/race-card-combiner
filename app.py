@@ -71,16 +71,20 @@ def process_pdfs(drf_bytes, rag_bytes):
                 if not cleaned_rows or (row['y'] - cleaned_rows[-1]['y'] > 8):
                     cleaned_rows.append(row)
             
-            for row in cleaned_rows:
+            # Stamp the unique Ragozin numbers next to each race
+            for i, row in enumerate(cleaned_rows):
                 if rag_index < len(ragozins):
                     val = ragozins[rag_index]
                     
-                    # Smart offset to prevent text clipping
-                    if len(val) > 1:
-                        inject_x = row['x'] - 20
+                    # Staggered offset: Push the first number further left to prevent clipping
+                    if i == 0:
+                        inject_x = row['x'] - 24
                     else:
-                        inject_x = row['x'] - 14
-                        
+                        if len(val) > 1:
+                            inject_x = row['x'] - 20
+                        else:
+                            inject_x = row['x'] - 16
+                            
                     inject_y = row['y'] - 2 
                     
                     page.insert_text(
@@ -112,14 +116,5 @@ if drf_file and rag_file:
                 st.error("🚨 Encountered a processing error. Please share this output:")
                 st.code(error_message)
             else:
-                # Dynamic file naming: Prepends "Combo_" to the original DRF filename
                 original_name = drf_file.name if drf_file else "RaceCard.pdf"
-                output_filename = f"Combo_{original_name}"
-                
-                st.success("Successfully mapped, parsed, and injected!")
-                st.download_button(
-                    label="📥 Download Combined PDF",
-                    data=combined_pdf_bytes,
-                    file_name=output_filename,
-                    mime="application/pdf"
-                )
+                output_filename = f
