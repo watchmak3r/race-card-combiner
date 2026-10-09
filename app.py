@@ -30,24 +30,25 @@ with col2:
     rag_file = st.file_uploader("2. Ragozin Sheets (PDF)", type="pdf", key="rag")
 
 def extract_ragozin_page_numbers(rag_page):
-    """Extracts Ragozin figures ordered right-to-left across year columns and top-to-bottom vertically."""
+    """Extracts Ragozin figures, ignoring the upcoming race reference line at the top."""
     words = rag_page.get_text("words")
-    body_words = [w for w in words if 40 < w[1] < 730]
+    # Filter out page headers, footers, and the top header line representing the upcoming race
+    body_words = [w for w in words if 70 < w[1] < 730]
     
-    # Sort right-to-left by column buckets (-round(w[0] / 80)), then top-to-bottom (w[1])
+    # Sort right-to-left by year columns (-round(w[0] / 80)), then top-to-bottom vertically (w[1])
     sorted_words = sorted(body_words, key=lambda w: (-round(w[0] / 80), w[1]))
     
     page_numbers = []
     seen_pos = set()
     for w in sorted_words:
-        text = w[4].strip()
-        if re.match(r'^[\.\d]{1,3}[+\-"]?$', text) or re.match(r'^\d{1,2}[+\-"]?$', text):
-            clean_val = re.sub(r'^\.', '', text)
-            if len(clean_val) > 0:
-                # Deduplicate numbers that share nearly identical coordinates
+        raw_text = w[4].strip()
+        digits_match = re.search(r'\d{1,2}', raw_text)
+        if digits_match:
+            val_num = int(digits_match.group())
+            if 1 <= val_num <= 45:
                 pos_key = (round(w[0] / 10), round(w[1] / 10))
                 if pos_key not in seen_pos:
-                    page_numbers.append(text)
+                    page_numbers.append(str(val_num))
                     seen_pos.add(pos_key)
                     
     return page_numbers
@@ -90,7 +91,9 @@ def process_pdfs(drf_bytes, rag_bytes):
             for pp_rows in horses_data:
                 horse_rag_numbers = []
                 if rag_page_idx < len(rag_doc):
-                    horse_rag_numbers = extract_ragozin_page_numbers(rag_doc[rag_page_idx])
+                    # Skip the first extracted number if it represents the upcoming race reference line
+                    all_extracted = extract_ragozin_page_numbers(rag_doc[rag_page_idx])
+                    horse_rag_numbers = all_extracted[1:] if len(all_extracted) > 0 else []
                     rag_page_idx += 1
                 
                 cleaned_rows = []
