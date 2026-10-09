@@ -3,6 +3,7 @@ import fitz
 import re
 import io
 import traceback
+import unicodedata
 from datetime import date
 
 # Configure iPad-Friendly UI Layout
@@ -88,12 +89,23 @@ def figure_to_number(base, mod):
     return {"-": n - 0.25, "+": n + 0.25, '"': n + 0.5}.get(mod, n)
 
 
-def normalize_name(name):
-    n = name.upper().replace("’", "").replace("'", "").replace("`", "")
-    n = re.sub(rf"\s*\(({FOREIGN_SUFFIXES})\)", "", n)
-    n = re.sub(rf"-({FOREIGN_SUFFIXES})\b", "", n)
-    n = re.sub(r"[^A-Z0-9 ]", " ", n)
-    return re.sub(r"\s+", " ", n).strip()
+def _clean(n):
+    # Strip accents (Señor -> SENOR), apostrophes, and punctuation
+    n = unicodedata.normalize("NFKD", n).encode("ascii", "ignore").decode()
+    n = n.upper().replace("'", "").replace("`", "")
+    return n
+
+
+def name_keys(name):
+    """All reasonable keys for a name. Covers hyphenated names that also carry a
+    country tag (e.g. TWENTY-ONE-IR), where stripping once vs twice differs."""
+    n = _clean(name.replace("’", "'"))
+    had_drf_tag = bool(re.search(r"\([A-Z]{2,4}\)\s*$", n))
+    n = re.sub(r"\s*\([A-Z]{2,4}\)\s*$", "", n)
+    keys = {re.sub(r"[^A-Z0-9]", "", n)}
+    if not had_drf_tag:                 # only Ragozin-style names carry -IR / -BR tags
+        keys.add(re.sub(r"[^A-Z0-9]", "", re.sub(r"-[A-Z]{2,3}$", "", n)))
+    return keys
 
 
 def parse_ragozin_page(page):
@@ -335,38 +347,46 @@ def process_pdfs(drf_bytes, rag_bytes):
         rag_doc = fitz.open(stream=rag_bytes, filetype="pdf")
 
         rag_horses = parse_ragozin_pdf(rag_doc)
-        rag_by_name = {}
+        rag_by_name = {}          # key -> list of sheet indexes (same name can appear twice)
         for i, h in enumerate(rag_horses):
             if h["name"]:
-                rag_by_name.setdefault(normalize_name(h["name"]), i)
+                for k in name_keys(h["name"]):
+                    rag_by_name.setdefault(k, []).append(i)
+
+        def find_sheet(drf_name, race_no):
+            cands = []
+            for k in name_keys(drf_name):
+                cands += [i for i in rag_by_name.get(k, []) if i not in cands]
+            if not cands:
+                return None, "no sheet"
+            # Prefer the sheet for this race (handles two horses with the same name,
+            # e.g. one US-bred and one Irish-bred), then any sheet not already used
+            same_race = [i for i in cands if rag_horses[i].get("race_number") == race_no]
+            unused = [i for i in (same_race or cands) if i not in used]
+            pick = (unused or same_race or cands)[0]
+            return pick, "name"
         used = set()
-        next_idx = 0
         current = None              # horse being filled; can continue onto the next page
 
         for page_num, page in enumerate(drf_doc, 1):
             names, rows = find_drf_horses_and_rows(page)
+            rm = re.search(r"race\s+(\d+),\s*page", page.get_text())
+            race_no = int(rm.group(1)) if rm else None
             name_iter = iter(names)
             next_name = next(name_iter, None)
 
             for row in rows:
                 # Start a new horse whenever we pass a horse name
                 while next_name is not None and next_name["y"] < row["y"]:
-                    key = normalize_name(next_name["name"])
-                    idx = rag_by_name.get(key)
-                    method = "name"
-                    if idx is None or idx in used:
-                        while next_idx < len(rag_horses) and next_idx in used:
-                            next_idx += 1
-                        idx = next_idx if next_idx < len(rag_horses) else None
-                        method = "page order"
+                    idx, method = find_sheet(next_name["name"], race_no)
                     if idx is not None:
                         used.add(idx)
-                        next_idx = max(next_idx, idx + 1)
                     current = {
                         "lines": rag_horses[idx]["lines"] if idx is not None else [],
                         "pos": 0,
                         "report": {"DRF page": page_num, "DRF horse": next_name["name"],
                                    "Ragozin sheet": rag_horses[idx]["name"] if idx is not None else "NONE",
+                                   "race": race_no,
                                    "matched by": method, "PP rows": 0, "figures placed": 0},
                     }
                     report.append(current["report"])
@@ -414,7 +434,13 @@ def process_pdfs(drf_bytes, rag_bytes):
         drf_doc.close()
         rag_doc.close()
 
-        stats = {"rag_horses": len(rag_horses),
+        # Things worth a human look
+        unmatched_sheets = [h["name"] for i, h in enumerate(rag_horses) if i not in used]
+        no_sheet_with_rows = [r["DRF horse"] for r in report
+                              if r["matched by"] == "no sheet" and r["PP rows"] > 0]
+        stats = {"unmatched_sheets": unmatched_sheets,
+                 "no_sheet_with_rows": no_sheet_with_rows,
+                 "rag_horses": len(rag_horses),
                  "rag_lines": sum(len(h["lines"]) for h in rag_horses),
                  "drf_horses": len(report),
                  "placed": sum(r["figures placed"] for r in report)}
@@ -441,6 +467,12 @@ if drf_file and rag_file:
                 st.success(
                     f"Read {stats['rag_lines']} race lines from {stats['rag_horses']} Ragozin sheets. "
                     f"Found {stats['drf_horses']} horses in the DRF. Placed {stats['placed']} figures.")
+                if stats['no_sheet_with_rows']:
+                    st.warning("These horses have past races but no Ragozin sheet was found for them "
+                               "(check the spelling on both sheets): " + ", ".join(stats['no_sheet_with_rows']))
+                if stats['unmatched_sheets']:
+                    st.warning("These Ragozin sheets didn't match any horse in the DRF: "
+                               + ", ".join(stats['unmatched_sheets']))
                 if stats['placed'] == 0:
                     st.warning("No figures were placed. Open the troubleshooting sections below "
                                "and send a screenshot so the cause can be pinned down.")
