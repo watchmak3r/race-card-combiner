@@ -30,17 +30,23 @@ with col2:
     rag_file = st.file_uploader("2. Ragozin Sheets (PDF)", type="pdf", key="rag")
 
 def extract_ragozin_numbers(rag_bytes):
-    """Parses numbers dynamically from the Ragozin PDF sheets."""
+    """Targeted parser to extract actual Ragozin speed figures from the sheets."""
     rag_doc = fitz.open(stream=rag_bytes, filetype="pdf")
     all_numbers = []
     
     for page in rag_doc:
-        text = page.get_text()
-        tokens = re.findall(r'(?<!\d)\d{1,2}[+\-"]?(?!\d)', text)
-        for t in tokens:
-            clean_val = int(re.sub(r'\D', '', t))
-            if 1 <= clean_val <= 50:
-                all_numbers.append(t)
+        # Extract words with layout coordinates to process grid columns logically
+        words = page.get_text("words")
+        # Sort words top-to-bottom, left-to-right
+        sorted_words = sorted(words, key=lambda w: (w[1], w[0]))
+        
+        for w in sorted_words:
+            text = w[4].strip()
+            # Match standard Ragozin figures (typically 1 to 40 integers with optional symbols)
+            if re.match(r'^\d{1,2}[+\-"]?$', text):
+                val_num = int(re.sub(r'\D', '', text))
+                if 1 <= val_num <= 45:
+                    all_numbers.append(text)
                 
     rag_doc.close()
     return all_numbers
@@ -71,12 +77,10 @@ def process_pdfs(drf_bytes, rag_bytes):
                 if not cleaned_rows or (row['y'] - cleaned_rows[-1]['y'] > 8):
                     cleaned_rows.append(row)
             
-            # Stamp the unique Ragozin numbers next to each race
             for i, row in enumerate(cleaned_rows):
                 if rag_index < len(ragozins):
                     val = ragozins[rag_index]
                     
-                    # Staggered offset: Push the first number further left to prevent clipping
                     if i == 0:
                         inject_x = row['x'] - 24
                     else:
