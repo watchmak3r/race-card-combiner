@@ -30,10 +30,12 @@ with col2:
     rag_file = st.file_uploader("2. Ragozin Sheets (PDF)", type="pdf", key="rag")
 
 def extract_ragozin_page_numbers(rag_page):
-    """Extracts Ragozin figures and modifiers from an individual horse's page."""
+    """Extracts Ragozin figures in correct chronological sequence (newest to oldest)."""
     words = rag_page.get_text("words")
     body_words = [w for w in words if 40 < w[1] < 730]
-    sorted_words = sorted(body_words, key=lambda w: (w[1] // 15, w[0]))
+    
+    # Sort right-to-left across year columns (-w[0]) and top-to-bottom vertically (w[1])
+    sorted_words = sorted(body_words, key=lambda w: (-w[0], w[1]))
     
     page_numbers = []
     for w in sorted_words:
