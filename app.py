@@ -45,15 +45,6 @@ LINE_TOP_FROM_BASELINE = 7
 FIGURE_FONTS = {"W1HotDog", "R2Sq1", "Rs30Bold", "NewCenturySchlbk-Roman", "CaxExBold1", "HV3-Normal"}
 FOREIGN_SUFFIXES = "IRE|IR|GB|FR|GER|SAF|SA|BRZ|ARG|CHI|JPN|AUS|NZ|CAN|ITY|PER|URU"
 
-# Ragozin 2-letter track code -> DRF track abbreviation (uppercase)
-RAG_TO_DRF_TRACK = {
-    "AQ": "AQU", "Sr": "SAR", "BE": "BEL", "CD": "CD", "GP": "GP", "KE": "KEE", "LR": "LRL",
-    "FG": "FG", "Pd": "PID", "CN": "CNL", "MT": "MTH", "DE": "DEL", "TA": "TAM", "OP": "OP",
-    "EL": "ELP", "TP": "TP", "SA": "SA", "KD": "KD", "DM": "DMR", "FL": "FL", "IN": "IND",
-    "PX": "PRX", "PE": "PEN", "WO": "WO", "PI": "PIM", "GG": "GG", "CT": "CT",
-    "BT": "BTP", "PR": "PRM", "ME": "MEY",   # best guesses
-}
-
 
 def span_role(font, size, text):
     if font == "Courier-Bold":
@@ -249,48 +240,92 @@ def parse_ragozin_pdf(rag_doc):
 
 
 # =============================================================================
-# DRF side helpers
+# DRF side: find each horse and its PP rows, paste Ragozin figures in order
 # =============================================================================
 
-MONTHS = {m: i for i, m in enumerate(
-    ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"], 1)}
-DRF_DATE_RE = re.compile(r"(\d{1,2})(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)(\d{2})\s*(?:\d{1,2}\s*)?([A-Z][A-Za-z]{1,3})?")
+WEIGHT_PATTERN = re.compile(r'^L?1[1-3]\d[a-zA-Z]*$')
 
 
-def words_on_line(words, y_bottom, max_x=None, tol=3):
-    ws = [w for w in words if abs(w[3] - y_bottom) <= tol and (max_x is None or w[0] < max_x)]
-    return " ".join(w[4] for w in sorted(ws, key=lambda w: w[0]))
+DATE_AT_LEFT = re.compile(r'^(\d{1,2})\D(\d{2})')     # DRF row date, e.g. 22Aug26 (month is a symbol in the PDF)
+WEIGHT_AT_END = re.compile(r'L?1[1-3]\d[a-z]{0,3}$')
 
 
-def parse_drf_row_date(text):
-    m = DRF_DATE_RE.search(text)
-    if not m:
-        return None, None
-    try:
-        d = date(2000 + int(m.group(3)), MONTHS[m.group(2)], int(m.group(1)))
-    except ValueError:
-        return None, None
-    return d, (m.group(4) or "").upper()
+def find_drf_horses_and_rows(page):
+    """Horse names are the big 13.8pt bold text at the left margin.
+    A PP row is any line that starts with a race date at the left edge, which
+    covers US and foreign races and ignores comment lines like '110yds'.
+    The figure is placed just left of that row's weight (L126 / 126)."""
+    names = []
+    for block in page.get_text("dict")["blocks"]:
+        for line in block.get("lines", []):
+            for s in line["spans"]:
+                t = s["text"].strip()
+                if t and 13 <= s["size"] <= 15 and s["bbox"][0] < 50:
+                    names.append({"name": t, "y": s["bbox"][3]})
 
-
-def match_line_for_row(rag_lines, used, row_date, row_track):
-    """Exact date wins (any track). Estimated-day lines may be off by up to 3 days at the same track."""
-    best, best_score = None, None
-    for idx, l in enumerate(rag_lines):
-        if idx in used:
+    words = page.get_text("words")
+    rows = []
+    for d in words:
+        if d[0] >= 40 or not DATE_AT_LEFT.match(d[4]):
             continue
-        diff = abs((l["date"] - row_date).days)
-        drf_track = RAG_TO_DRF_TRACK.get(l["rag_track"])
-        track_ok = (drf_track is None or not row_track or drf_track == row_track)
+        same_line = [v for v in words if abs(v[3] - d[3]) < 2]
+        weight_x = None
+        for v in sorted(same_line, key=lambda v: v[0]):
+            if 350 < v[0] < 395 and WEIGHT_PATTERN.match(v[4]):
+                weight_x = v[0]
+                break
+        glued = False
+        if weight_x is None:
+            # Weight glued onto a long name, e.g. "Soumillon126"
+            for v in same_line:
+                m = WEIGHT_AT_END.search(v[4])
+                if m and 365 < v[2] < 395 and len(v[4]) > len(m.group()):
+                    weight_x = v[2] - fitz.get_text_length(m.group(), fontname="helv", fontsize=8.5) * 0.55
+                    glued = True
+                    break
+        if weight_x is None:
+            weight_x = 369
+        # Foreign rows: a trainer name can run underneath the weight. Stop before it.
+        crossing = [v[0] for v in same_line if v[0] < weight_x - 1 and v[2] > weight_x + 12]
+        x = min(crossing + [weight_x])
+        left = [v[2] for v in same_line if 250 < v[2] <= x + 0.5]
+        if glued:
+            left.append(x)                    # the name runs right up to the weight
+        dm = DATE_AT_LEFT.match(d[4])
+        rows.append({"x": x, "y": d[3], "text_end": max(left) if left else x - 30,
+                     "day": int(dm.group(1)), "year": 2000 + int(dm.group(2))})
+
+    rows.sort(key=lambda r: r["y"])
+    cleaned = []
+    for r in rows:
+        if not cleaned or r["y"] - cleaned[-1]["y"] > 4:
+            cleaned.append(r)
+    return sorted(names, key=lambda n: n["y"]), cleaned
+
+
+def next_figure(current, row):
+    """Figures go down the PP rows in order. One safety check: the row's year and
+    day of month (readable even though DRF hides the month) must agree with the
+    Ragozin line. That keeps European horses lined up, since Ragozin leaves some
+    overseas races off the sheet entirely."""
+    lines = current["lines"]
+    pos = current["pos"]
+    # Skip Ragozin lines newer than this row (races DRF doesn't show)
+    while pos < len(lines) and lines[pos]["date"].year > row["year"]:
+        pos += 1
+    # Within the same year, find the line for this day (estimated days can be off a bit)
+    for j in range(pos, len(lines)):
+        l = lines[j]
+        if l["date"].year != row["year"]:
+            break
+        gap = abs(l["date"].day - row["day"])
         if l["day_estimated"]:
-            if diff > 3 or not track_ok:
-                continue
-        elif diff != 0:
-            continue
-        score = diff + (0 if track_ok else 0.5)
-        if best_score is None or score < best_score:
-            best, best_score = idx, score
-    return best
+            gap = min(gap, 31 - gap)          # an estimate near a month edge can wrap (31st vs 1st)
+        if gap <= (3 if l["day_estimated"] else 0):
+            current["pos"] = j + 1
+            return l["figure_raw"]
+    current["pos"] = pos
+    return None          # race not on the Ragozin sheet: leave the row blank
 
 
 def process_pdfs(drf_bytes, rag_bytes):
@@ -304,123 +339,96 @@ def process_pdfs(drf_bytes, rag_bytes):
         for i, h in enumerate(rag_horses):
             if h["name"]:
                 rag_by_name.setdefault(normalize_name(h["name"]), i)
-        used_horses = set()
-        next_rag_idx = 0          # fallback: next Ragozin page in order
-
-        weight_pattern = re.compile(r'^L?1[1-3]\d[a-zA-Z]*$')
-        horse_header_pattern = re.compile(r'^\d+\s+[A-Z]')
-
-        current = None            # state for the horse currently being filled (can span pages)
+        used = set()
+        next_idx = 0
+        current = None              # horse being filled; can continue onto the next page
 
         for page_num, page in enumerate(drf_doc, 1):
-            words = page.get_text("words")
+            names, rows = find_drf_horses_and_rows(page)
+            name_iter = iter(names)
+            next_name = next(name_iter, None)
 
-            elements = []
-            for w in words:
-                text = w[4].strip()
-                x_coord = w[0]
-                if weight_pattern.match(text) and x_coord > 350:
-                    elements.append({'type': 'pp_row', 'x': x_coord, 'y': w[3]})
-                elif horse_header_pattern.match(text) and x_coord < 70:
-                    elements.append({'type': 'horse_header', 'x': x_coord, 'y': w[3]})
-
-            # Group rows by horse; rows before the first header continue the previous page's horse
-            groups = []
-            group = {'header_y': None, 'rows': []}
-            for el in sorted(elements, key=lambda e: e['y']):
-                if el['type'] == 'horse_header':
-                    if group['rows'] or group['header_y'] is not None:
-                        groups.append(group)
-                    group = {'header_y': el['y'], 'rows': []}
-                else:
-                    group['rows'].append({'x': el['x'], 'y': el['y']})
-            if group['rows'] or group['header_y'] is not None:
-                groups.append(group)
-
-            for g in groups:
-                if g['header_y'] is not None:
-                    # New horse: find its Ragozin sheet by name, else take the next one in order
-                    header_text = normalize_name(words_on_line(words, g['header_y'], tol=4))
-                    rag_idx, method = None, None
-                    for name, idx in rag_by_name.items():
-                        if idx not in used_horses and re.search(rf"\b{re.escape(name)}\b", header_text):
-                            rag_idx, method = idx, "name"
-                            break
-                    if rag_idx is None:
-                        while next_rag_idx < len(rag_horses) and next_rag_idx in used_horses:
-                            next_rag_idx += 1
-                        if next_rag_idx < len(rag_horses):
-                            rag_idx, method = next_rag_idx, "page order"
-                    if rag_idx is not None:
-                        used_horses.add(rag_idx)
-                        next_rag_idx = max(next_rag_idx, rag_idx + 1)
+            for row in rows:
+                # Start a new horse whenever we pass a horse name
+                while next_name is not None and next_name["y"] < row["y"]:
+                    key = normalize_name(next_name["name"])
+                    idx = rag_by_name.get(key)
+                    method = "name"
+                    if idx is None or idx in used:
+                        while next_idx < len(rag_horses) and next_idx in used:
+                            next_idx += 1
+                        idx = next_idx if next_idx < len(rag_horses) else None
+                        method = "page order"
+                    if idx is not None:
+                        used.add(idx)
+                        next_idx = max(next_idx, idx + 1)
                     current = {
-                        'horse': rag_horses[rag_idx] if rag_idx is not None else None,
-                        'used_lines': set(), 'order_pos': 0,
-                        'report': {'DRF page': page_num, 'DRF header': header_text[:40],
-                                   'Ragozin horse': rag_horses[rag_idx]["name"] if rag_idx is not None else "NONE",
-                                   'matched by': method or "-", 'rows': 0, 'figures placed': 0,
-                                   'row matching': ""},
+                        "lines": rag_horses[idx]["lines"] if idx is not None else [],
+                        "pos": 0,
+                        "report": {"DRF page": page_num, "DRF horse": next_name["name"],
+                                   "Ragozin sheet": rag_horses[idx]["name"] if idx is not None else "NONE",
+                                   "matched by": method, "PP rows": 0, "figures placed": 0},
                     }
-                    report.append(current['report'])
-                if current is None or current['horse'] is None:
+                    report.append(current["report"])
+                    next_name = next(name_iter, None)
+
+                if current is None:
+                    continue
+                current["report"]["PP rows"] += 1
+                val = next_figure(current, row)
+                if not val:
                     continue
 
-                rag_lines = current['horse']['lines']
-
-                cleaned_rows = []
-                for row in g['rows']:
-                    if not cleaned_rows or (row['y'] - cleaned_rows[-1]['y'] > 8):
-                        cleaned_rows.append(row)
-
-                for row in cleaned_rows:
-                    current['report']['rows'] += 1
-                    first_row_of_horse = current['report']['rows'] == 1
-                    row_date, row_track = parse_drf_row_date(words_on_line(words, row['y'], max_x=row['x']))
-
-                    if row_date is not None:
-                        current['report']['row matching'] = "by date"
-                        idx = match_line_for_row(rag_lines, current['used_lines'], row_date, row_track)
-                    else:
-                        # No readable date: fall back to newest-first order
-                        current['report']['row matching'] = "by order (no DRF date found)"
-                        idx = current['order_pos'] if current['order_pos'] < len(rag_lines) else None
-                        current['order_pos'] += 1
-                    if idx is None:
-                        continue
-                    current['used_lines'].add(idx)
-                    val = rag_lines[idx]['figure_raw']
-                    if not val:
-                        continue
-
-                    # Right-align the figure where the old 1-2 digit numbers ended
-                    right_edge = row['x'] - (14 if first_row_of_horse else 10)
-                    inject_x = right_edge - fitz.get_text_length(val, fontname="hebo", fontsize=9)
+                # Figure sits right up against the weight column (L126). On the few
+                # rows where a long jockey name runs that far, a white backing keeps
+                # the number readable.
+                m = re.match(r'^(\d+|XX)(.*)$', val)
+                digits, modifier = (m.group(1), m.group(2)) if m else (val, "")
+                digits_w = fitz.get_text_length(digits, fontname="hebo", fontsize=9)
+                mod_w = fitz.get_text_length(modifier, fontname="hebo", fontsize=7) if modifier else 0
+                right_edge = row["x"] - 1.5
+                inject_x = right_edge - digits_w - (mod_w + 0.2 if modifier else 0)
+                if inject_x < row["text_end"] + 1:
+                    page.draw_rect(
+                        fitz.Rect(inject_x - 0.8, row["y"] - 8.5, right_edge + 0.3, row["y"] - 0.5),
+                        color=None, fill=(1, 1, 1), overlay=True)
+                page.insert_text(
+                    fitz.Point(inject_x, row["y"] - 2),
+                    digits,
+                    fontsize=9,
+                    fontname="hebo",
+                    color=(1, 0, 0)
+                )
+                if modifier:
                     page.insert_text(
-                        fitz.Point(inject_x, row['y'] - 2),
-                        val,
-                        fontsize=9,
+                        fitz.Point(inject_x + digits_w + 0.2, row["y"] - 2),
+                        modifier,
+                        fontsize=7,
                         fontname="hebo",
                         color=(1, 0, 0)
                     )
-                    current['report']['figures placed'] += 1
+                current["report"]["figures placed"] += 1
 
         output_pdf = io.BytesIO()
         drf_doc.save(output_pdf)
         drf_doc.close()
         rag_doc.close()
 
-        return output_pdf.getvalue(), None, report, rag_horses
+        stats = {"rag_horses": len(rag_horses),
+                 "rag_lines": sum(len(h["lines"]) for h in rag_horses),
+                 "drf_horses": len(report),
+                 "placed": sum(r["figures placed"] for r in report)}
+        return output_pdf.getvalue(), None, report, rag_horses, stats
 
     except Exception:
-        return None, traceback.format_exc(), report, None
+        return None, traceback.format_exc(), report, None, None
 
 
 if drf_file and rag_file:
     if st.button("Combine Data", type="primary"):
         with st.spinner("Extracting Ragozin sheets per horse and aligning race card data..."):
 
-            combined_pdf_bytes, error_message, report, rag_horses = process_pdfs(
+            combined_pdf_bytes, error_message, report, rag_horses, stats = process_pdfs(
                 drf_file.getvalue(), rag_file.getvalue())
 
             if error_message:
@@ -430,7 +438,12 @@ if drf_file and rag_file:
                 original_name = drf_file.name if drf_file else "RaceCard.pdf"
                 output_filename = f"Combo_{original_name}"
 
-                st.success("Successfully mapped, parsed, and injected!")
+                st.success(
+                    f"Read {stats['rag_lines']} race lines from {stats['rag_horses']} Ragozin sheets. "
+                    f"Found {stats['drf_horses']} horses in the DRF. Placed {stats['placed']} figures.")
+                if stats['placed'] == 0:
+                    st.warning("No figures were placed. Open the troubleshooting sections below "
+                               "and send a screenshot so the cause can be pinned down.")
                 st.download_button(
                     label="📥 Download Combined PDF",
                     data=combined_pdf_bytes,
