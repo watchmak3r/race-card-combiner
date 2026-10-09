@@ -30,24 +30,26 @@ with col2:
     rag_file = st.file_uploader("2. Ragozin Sheets (PDF)", type="pdf", key="rag")
 
 def extract_ragozin_page_numbers(rag_page):
-    """Extracts Ragozin figures ordered strictly top-to-bottom by vertical coordinate to match timeline flow."""
+    """Extracts Ragozin figures ordered right-to-left across year columns and top-to-bottom vertically."""
     words = rag_page.get_text("words")
     body_words = [w for w in words if 40 < w[1] < 730]
     
-    # Sort strictly top-to-bottom by Y coordinate
-    sorted_words = sorted(body_words, key=lambda w: w[1])
+    # Sort right-to-left by column buckets (-round(w[0] / 80)), then top-to-bottom (w[1])
+    sorted_words = sorted(body_words, key=lambda w: (-round(w[0] / 80), w[1]))
     
     page_numbers = []
-    seen_y = set()
+    seen_pos = set()
     for w in sorted_words:
         text = w[4].strip()
-        if re.match(r'^\d{1,2}[+\-"]?$', text):
-            val_num = int(re.sub(r'\D', '', text))
-            if 1 <= val_num <= 45:
-                y_bucket = round(w[1] / 6) * 6
-                if y_bucket not in seen_y:
+        if re.match(r'^[\.\d]{1,3}[+\-"]?$', text) or re.match(r'^\d{1,2}[+\-"]?$', text):
+            clean_val = re.sub(r'^\.', '', text)
+            if len(clean_val) > 0:
+                # Deduplicate numbers that share nearly identical coordinates
+                pos_key = (round(w[0] / 10), round(w[1] / 10))
+                if pos_key not in seen_pos:
                     page_numbers.append(text)
-                    seen_y.add(y_bucket)
+                    seen_pos.add(pos_key)
+                    
     return page_numbers
 
 def process_pdfs(drf_bytes, rag_bytes):
