@@ -117,4 +117,12 @@ if drf_file and rag_file:
                 st.code(error_message)
             else:
                 original_name = drf_file.name if drf_file else "RaceCard.pdf"
-                output_filename = f
+                output_filename = f"Combo_{original_name}"
+                
+                st.success("Successfully mapped, parsed, and injected!")
+                st.download_button(
+                    label="📥 Download Combined PDF",
+                    data=combined_pdf_bytes,
+                    file_name=output_filename,
+                    mime="application/pdf"
+                )
