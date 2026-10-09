@@ -30,24 +30,24 @@ with col2:
     rag_file = st.file_uploader("2. Ragozin Sheets (PDF)", type="pdf", key="rag")
 
 def extract_ragozin_numbers(rag_bytes):
-    """Strict parser to pull only valid Ragozin sheet numbers from the core grid columns."""
+    """Accurately extracts Ragozin numbers and modifiers sequentially from the sheets."""
     rag_doc = fitz.open(stream=rag_bytes, filetype="pdf")
     all_numbers = []
     
     for page in rag_doc:
         words = page.get_text("words")
-        # Filter words to only look at the central body area where figures live, ignoring headers/footers
-        # word format: (x0, y0, x1, y1, "word", block_no, line_no, word_no)
-        body_words = [w for w in words if 50 < w[1] < 720]
+        # Filter out top headers/footers to target core grid data
+        body_words = [w for w in words if 40 < w[1] < 730]
         
-        # Sort top-to-bottom, then left-to-right columns
-        sorted_words = sorted(body_words, key=lambda w: (w[0] // 50, w[1]))
+        # Sort words top-to-bottom, then left-to-right to maintain sheet reading order
+        sorted_words = sorted(body_words, key=lambda w: (w[1] // 15, w[0]))
         
         for w in sorted_words:
             text = w[4].strip()
+            # Capture standard Ragozin figures including numbers with quote marks, plus/minus signs
             if re.match(r'^\d{1,2}[+\-"]?$', text):
                 val_num = int(re.sub(r'\D', '', text))
-                if 1 <= val_num <= 40:
+                if 1 <= val_num <= 45:
                     all_numbers.append(text)
                 
     rag_doc.close()
@@ -59,7 +59,8 @@ def process_pdfs(drf_bytes, rag_bytes):
         ragozins = extract_ragozin_numbers(rag_bytes)
         rag_index = 0
         
-        weight_pattern = re.compile(r'^L?1[1-3]\d[a-zA-Z]*$')
+        # Match past performance date entries on the left margin (e.g., 23Aug26)
+        date_pattern = re.compile(r'^\d{1,2}[A-Za-z]{3}\d{2}')
         
         for page in drf_doc:
             words = page.get_text("words")
@@ -69,8 +70,8 @@ def process_pdfs(drf_bytes, rag_bytes):
                 text = w[4].strip()
                 x_coord = w[0]
                 
-                if weight_pattern.match(text) and x_coord > 350:
-                    found_rows.append({'x': x_coord, 'y': w[3]})
+                if date_pattern.match(text) and x_coord < 70:
+                    found_rows.append({'y': w[3]})
                     
             found_rows = sorted(found_rows, key=lambda d: d['y'])
             
@@ -79,18 +80,12 @@ def process_pdfs(drf_bytes, rag_bytes):
                 if not cleaned_rows or (row['y'] - cleaned_rows[-1]['y'] > 8):
                     cleaned_rows.append(row)
             
-            for i, row in enumerate(cleaned_rows):
+            # Stamp the unique Ragozin numbers cleanly on the left margin
+            for row in cleaned_rows:
                 if rag_index < len(ragozins):
                     val = ragozins[rag_index]
                     
-                    if i == 0:
-                        inject_x = row['x'] - 24
-                    else:
-                        if len(val) > 1:
-                            inject_x = row['x'] - 20
-                        else:
-                            inject_x = row['x'] - 16
-                            
+                    inject_x = 18  # Fixed left-margin position
                     inject_y = row['y'] - 2 
                     
                     page.insert_text(
