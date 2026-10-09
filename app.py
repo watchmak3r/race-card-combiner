@@ -30,22 +30,24 @@ with col2:
     rag_file = st.file_uploader("2. Ragozin Sheets (PDF)", type="pdf", key="rag")
 
 def extract_ragozin_numbers(rag_bytes):
-    """Targeted parser to extract actual Ragozin speed figures from the sheets."""
+    """Strict parser to pull only valid Ragozin sheet numbers from the core grid columns."""
     rag_doc = fitz.open(stream=rag_bytes, filetype="pdf")
     all_numbers = []
     
     for page in rag_doc:
-        # Extract words with layout coordinates to process grid columns logically
         words = page.get_text("words")
-        # Sort words top-to-bottom, left-to-right
-        sorted_words = sorted(words, key=lambda w: (w[1], w[0]))
+        # Filter words to only look at the central body area where figures live, ignoring headers/footers
+        # word format: (x0, y0, x1, y1, "word", block_no, line_no, word_no)
+        body_words = [w for w in words if 50 < w[1] < 720]
+        
+        # Sort top-to-bottom, then left-to-right columns
+        sorted_words = sorted(body_words, key=lambda w: (w[0] // 50, w[1]))
         
         for w in sorted_words:
             text = w[4].strip()
-            # Match standard Ragozin figures (typically 1 to 40 integers with optional symbols)
             if re.match(r'^\d{1,2}[+\-"]?$', text):
                 val_num = int(re.sub(r'\D', '', text))
-                if 1 <= val_num <= 45:
+                if 1 <= val_num <= 40:
                     all_numbers.append(text)
                 
     rag_doc.close()
